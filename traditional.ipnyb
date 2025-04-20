@@ -1,0 +1,103 @@
+# Install dependencies
+!sudo apt install tesseract-ocr -y
+!pip install pytesseract opencv-python numpy matplotlib
+
+# Import libraries
+import cv2
+import pytesseract
+import numpy as np
+from collections import deque
+from google.colab import files
+import shutil
+import re
+
+# Upload video
+print("📤 Upload your video file (MP4, AVI, etc.)")
+uploaded = files.upload()
+video_path = list(uploaded.keys())[0]
+print(f"✅ Uploaded video: {video_path}")
+
+# Load Haar cascade
+plate_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_russian_plate_number.xml')
+
+# Open video
+cap = cv2.VideoCapture(video_path)
+
+# Video properties
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+# Output video
+output_video_path = "processed_video.mp4"
+out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+
+# Background subtractor
+bg_subtractor = cv2.createBackgroundSubtractorMOG2()
+
+# License plate buffer
+plate_buffer = deque(maxlen=10)
+
+# Regex pattern for format: A-123-BC
+plate_pattern = r'^[A-Z]{1}-[0-9]{3}-[A-Z]{2}$'
+
+# Start processing frames
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # Motion detection
+    fg_mask = bg_subtractor.apply(frame)
+    _, fg_thresh = cv2.threshold(fg_mask, 250, 255, cv2.THRESH_BINARY)
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    plates = plate_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50))
+
+    detected_plate = ""
+    plate_found_this_frame = False
+
+    for (x, y, w, h) in plates:
+        motion_region = fg_thresh[y:y+h, x:x+w]
+        motion_level = cv2.countNonZero(motion_region) / (w * h)
+
+        if motion_level < 0.03:
+            continue  # Skip static regions
+
+        plate_roi = gray[y:y+h, x:x+w]
+        raw_text = pytesseract.image_to_string(plate_roi, config='--psm 7')
+        cleaned_text = re.sub(r'[^A-Z0-9-]', '', raw_text.upper().strip())
+
+        if re.fullmatch(plate_pattern, cleaned_text):
+            plate_buffer.append(cleaned_text)
+            plate_found_this_frame = True
+
+    # Most stable plate
+    if plate_buffer:
+        detected_plate = max(set(plate_buffer), key=plate_buffer.count)
+
+    # Draw if plate was found
+    if detected_plate:
+        for (x, y, w, h) in plates:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(frame, detected_plate, (x, y-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+    # Clear buffer if no detection
+    if not plate_found_this_frame:
+        plate_buffer.clear()
+
+    # Write to output
+    out.write(frame)
+
+# Release everything
+cap.release()
+out.release()
+
+# Move output for download
+shutil.move(output_video_path, "/content/processed_video.mp4")
+
+# Download link
+print("✅ Processing complete! Download your video below:")
+files.download("/content/processed_video.mp4")
